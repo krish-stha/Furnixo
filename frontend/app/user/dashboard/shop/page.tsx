@@ -1,0 +1,562 @@
+"use client";
+
+import Link from "next/link";
+import React, { useEffect, useRef, useState } from "react";
+import { useRouter, usePathname } from "next/navigation";
+
+import { Header } from "../../component/header";
+import { Footer } from "../../component/footer";
+import { Button } from "@/app/auth/components/ui/button";
+import { Card } from "@/app/auth/components/ui/card";
+import { listPublicProducts } from "@/lib/api/public/products";
+import { useCart } from "@/lib/contexts/cart-context";
+import { listPublicCategories } from "@/lib/api/public/category";
+import { useAuth } from "@/lib/contexts/auth-contexts";
+import { getPublicSettings } from "@/lib/api/settings";
+import { ConfirmDialog } from "@/app/auth/components/ui/confirm-dialog";
+
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:5000";
+
+function productImageUrl(filename?: string | null) {
+  return `${BACKEND_URL}/public/product_images/${filename}`;
+}
+
+function money(n: any) {
+  const v = Number(n ?? 0);
+  return `Rs. ${Number.isFinite(v) ? v : 0}`;
+}
+
+type Category = {
+  _id: string;
+  name: string;
+  slug: string;
+};
+
+// ✅ Fly-to-cart animation (DOM only, no backend logic)
+function flyToCart(fromEl: HTMLElement | null) {
+  try {
+    const cartEl = document.getElementById("cart-icon");
+    if (!fromEl || !cartEl) return;
+
+    const from = fromEl.getBoundingClientRect();
+    const to = cartEl.getBoundingClientRect();
+
+    const clone = fromEl.cloneNode(true) as HTMLElement;
+
+    // If it's an <img>, keep aspect
+    clone.style.objectFit = "cover";
+
+    // Start position
+    clone.style.position = "fixed";
+    clone.style.left = `${from.left}px`;
+    clone.style.top = `${from.top}px`;
+    clone.style.width = `${from.width}px`;
+    clone.style.height = `${from.height}px`;
+    clone.style.zIndex = "9999";
+    clone.style.pointerEvents = "none";
+    clone.style.borderRadius = "16px";
+    clone.style.boxShadow = "0 10px 30px rgba(0,0,0,0.15)";
+    clone.style.transform = "translate3d(0,0,0) scale(1)";
+    clone.style.opacity = "1";
+    clone.style.transition =
+      "transform 700ms cubic-bezier(0.22, 1, 0.36, 1), opacity 700ms ease";
+
+    document.body.appendChild(clone);
+
+    // Target center of cart icon
+    const toX = to.left + to.width / 2;
+    const toY = to.top + to.height / 2;
+
+    // Move clone to cart center
+    const fromX = from.left + from.width / 2;
+    const fromY = from.top + from.height / 2;
+
+    const dx = toX - fromX;
+    const dy = toY - fromY;
+
+    // Animate in next frame
+    requestAnimationFrame(() => {
+      clone.style.transform = `translate3d(${dx}px, ${dy}px, 0) scale(0.15)`;
+      clone.style.opacity = "0.25";
+    });
+
+    // Small cart "pop" feedback
+    setTimeout(() => {
+      cartEl.animate(
+        [
+          { transform: "scale(1)" },
+          { transform: "scale(1.12)" },
+          { transform: "scale(1)" },
+        ],
+        { duration: 260, easing: "ease-out" }
+      );
+    }, 520);
+
+    // Cleanup
+    const cleanup = () => {
+      if (clone && clone.parentNode) clone.parentNode.removeChild(clone);
+    };
+    clone.addEventListener("transitionend", cleanup, { once: true });
+    setTimeout(cleanup, 900);
+  } catch {
+    // ignore
+  }
+}
+
+export default function ShopPage() {
+  const router = useRouter();
+  const { add, selectOnly, refresh } = useCart();
+  const { user } = useAuth();
+  const pathname = usePathname();
+  const [loginOpen, setLoginOpen] = useState(false);
+
+const requireLogin = () => {
+  if (user) return true;
+  setLoginOpen(true);
+  return false;
+};
+
+  const [lowStockThreshold, setLowStockThreshold] = useState<number>(5);
+
+  const [loading, setLoading] = useState(false);
+  const [catsLoading, setCatsLoading] = useState(false);
+  const [error, setError] = useState<string>("");
+
+  const [products, setProducts] = useState<any[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
+
+  const [search, setSearch] = useState("");
+  const [selectedCategorySlug, setSelectedCategorySlug] = useState<string>("");
+  const [sort, setSort] = useState<"newest" | "price_asc" | "price_desc">("newest");
+  const [onlyInStock, setOnlyInStock] = useState(false);
+
+  const [page, setPage] = useState(1);
+  const limit = 12;
+
+  const debounceRef = useRef<any>(null);
+  const didMountRef = useRef(false);
+
+  useEffect(() => {
+    let alive = true;
+
+    (async () => {
+      try {
+        const s = await getPublicSettings();
+        const t = Number(s?.data?.lowStockThreshold ?? 5);
+        if (!alive) return;
+        setLowStockThreshold(Number.isFinite(t) ? Math.max(1, t) : 5);
+      } catch {
+        // keep default
+      }
+    })();
+
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+
+    (async () => {
+      setCatsLoading(true);
+      try {
+        const res = await listPublicCategories();
+        if (!alive) return;
+        setCategories(res.data || []);
+      } catch {
+        if (!alive) return;
+        setCategories([]);
+      } finally {
+        if (!alive) return;
+        setCatsLoading(false);
+      }
+    })();
+
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const fetchProducts = async (nextPage: number, mode: "replace" | "append") => {
+    setLoading(true);
+    setError("");
+    try {
+      const res = await listPublicProducts({
+        page: nextPage,
+        limit,
+        sort,
+        search: search.trim() ? search.trim() : undefined,
+        categorySlug: selectedCategorySlug || undefined,
+      });
+
+      let data = res.data || [];
+      if (onlyInStock) {
+        data = data.filter((p: any) => Number(p.stock ?? 0) > 0);
+      }
+
+      setProducts((prev) => (mode === "append" ? [...prev, ...data] : data));
+    } catch (e: any) {
+      setError(e?.message || "Failed to load products");
+      if (mode === "replace") setProducts([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!didMountRef.current) {
+      didMountRef.current = true;
+      setPage(1);
+      fetchProducts(1, "replace");
+      return;
+    }
+
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+
+    debounceRef.current = setTimeout(() => {
+      setPage(1);
+      fetchProducts(1, "replace");
+    }, 350);
+
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search, selectedCategorySlug, sort, onlyInStock]);
+
+  const onSearch = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    setPage(1);
+    await fetchProducts(1, "replace");
+  };
+
+  const goProduct = (slug: string) => {
+    router.push(`/shop/${slug}`);
+  };
+
+  const buyNow = async (productId: string) => {
+    const pid = String(productId);
+
+    await add(pid, 1);
+
+    await refresh();
+    selectOnly(pid);
+    router.push("/user/dashboard/checkout");
+  };
+
+  return (
+    <div className="min-h-screen flex flex-col bg-slate-50">
+      <Header />
+      <ConfirmDialog
+  open={loginOpen}
+  onOpenChange={setLoginOpen}
+  title="Login required"
+  description="You need to sign in to continue."
+  confirmText="Go to login"
+  cancelText="Not now"
+  onConfirm={() => {
+    setLoginOpen(false);
+    router.push(`/auth/login?next=${encodeURIComponent(pathname)}`);
+  }}
+/>
+
+      <main className="flex-1">
+        <section className="bg-white border-b">
+          <div className="container mx-auto px-4 py-6">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h1 className="text-3xl font-bold text-slate-900">Shop</h1>
+                  <p className="text-slate-600 mt-1">
+                    Find products by category, compare prices, and add to cart.
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  {user && (
+                    <Link href="/user/dashboard/orders">
+                      <Button variant="outline" className="border-slate-300 h-10 rounded-xl">
+                        My Orders
+                      </Button>
+                    </Link>
+                  )}
+
+                  <Link href="/user/dashboard/cart">
+                    <Button
+                      className="bg-green-600 hover:bg-green-700 text-white h-10 rounded-xl"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        if (!requireLogin()) return;
+                        router.push("/user/dashboard/cart");
+                      }}
+                    >
+                      View Cart
+                    </Button>
+                  </Link>
+                </div>
+              </div>
+
+              <form onSubmit={onSearch} className="w-full lg:w-[640px]">
+                <div className="flex gap-2">
+                  <input
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    placeholder="Search products (name / SKU)…"
+                    className="flex-1 h-11 rounded-xl border bg-white px-4 outline-none focus:ring-2 focus:ring-green-200"
+                  />
+                  <Button className="h-11 bg-green-600 hover:bg-green-700 text-white px-6">
+                    Search
+                  </Button>
+                </div>
+
+                <div className="mt-3 flex flex-wrap items-center gap-3">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-slate-500">Sort</span>
+                    <select
+                      value={sort}
+                      onChange={(e) => setSort(e.target.value as any)}
+                      className="h-9 rounded-xl border bg-white px-3 text-sm outline-none"
+                    >
+                      <option value="newest">Newest</option>
+                      <option value="price_asc">Price: Low → High</option>
+                      <option value="price_desc">Price: High → Low</option>
+                    </select>
+                  </div>
+
+                  <label className="flex items-center gap-2 text-sm text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={onlyInStock}
+                      onChange={(e) => setOnlyInStock(e.target.checked)}
+                      className="h-4 w-4"
+                    />
+                    In stock only
+                  </label>
+
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-9 border-slate-300"
+                    onClick={() => {
+                      setSearch("");
+                      setSelectedCategorySlug("");
+                      setOnlyInStock(false);
+                      setSort("newest");
+                      setPage(1);
+                      fetchProducts(1, "replace");
+                    }}
+                  >
+                    Reset
+                  </Button>
+
+                  <div className="ml-auto text-xs text-slate-500">
+                    {loading ? "Loading…" : `${products.length} items`}
+                  </div>
+                </div>
+              </form>
+            </div>
+          </div>
+        </section>
+
+        <section className="container mx-auto px-4 py-8">
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            <aside className="lg:col-span-3">
+              <div className="sticky top-24">
+                <Card className="rounded-2xl p-5">
+                  <div className="flex items-center justify-between">
+                    <div className="font-semibold text-slate-900">Categories</div>
+                    {catsLoading && <div className="text-xs text-slate-500">Loading…</div>}
+                  </div>
+
+                  <div className="mt-4 space-y-1">
+                    <button
+                      onClick={() => setSelectedCategorySlug("")}
+                      className={`w-full text-left px-3 py-2 rounded-xl text-sm transition ${
+                        selectedCategorySlug === ""
+                          ? "bg-green-50 text-green-700 font-semibold"
+                          : "hover:bg-slate-50 text-slate-700"
+                      }`}
+                    >
+                      All Categories
+                    </button>
+
+                    <div className="max-h-[420px] overflow-auto pr-1 pt-1">
+                      {!catsLoading && categories.length === 0 ? (
+                        <div className="text-sm text-slate-500 px-3 py-3">No categories available</div>
+                      ) : (
+                        categories.map((c) => (
+                          <button
+                            key={c._id}
+                            onClick={() => setSelectedCategorySlug(c.slug)}
+                            className={`w-full text-left px-3 py-2 rounded-xl text-sm transition ${
+                              selectedCategorySlug === c.slug
+                                ? "bg-green-50 text-green-700 font-semibold"
+                                : "hover:bg-slate-50 text-slate-700"
+                            }`}
+                          >
+                            {c.name}
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                </Card>
+              </div>
+            </aside>
+
+            <div className="lg:col-span-9">
+              {error && (
+                <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                  {error}
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4">
+                {products.map((p) => {
+                  const firstImage = Array.isArray(p.images) ? p.images[0] : null;
+
+                  const hasDiscount =
+                    p.discountPrice !== null &&
+                    p.discountPrice !== undefined &&
+                    Number(p.discountPrice) < Number(p.price);
+
+                  const displayPrice = hasDiscount ? p.discountPrice : p.price;
+                  const inStock = Number(p.stock ?? 0) > 0;
+                  const low = inStock && Number(p.stock ?? 0) <= lowStockThreshold;
+
+                  // ✅ ref for animation start point
+                  const imgRef = React.createRef<HTMLImageElement>();
+
+                  return (
+                    <div
+                      key={p._id}
+                      className="group rounded-2xl border bg-white overflow-hidden shadow-sm hover:shadow-md transition"
+                    >
+                      <div
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => goProduct(p.slug)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") goProduct(p.slug);
+                        }}
+                        className="block cursor-pointer"
+                      >
+                        <div className="relative h-44 bg-slate-50 flex items-center justify-center overflow-hidden">
+                          <img
+                            ref={imgRef}
+                            src={productImageUrl(firstImage)}
+                            alt={p.name}
+                            className="h-full w-full object-contain group-hover:scale-[1.03] transition-transform"
+                          />
+
+                          <div className="absolute top-3 left-3 flex gap-2">
+                            {hasDiscount && (
+                              <span className="text-xs px-2 py-1 rounded-full bg-red-50 text-red-700 font-semibold">
+                                Sale
+                              </span>
+                            )}
+                            {low && (
+                              <span className="text-xs px-2 py-1 rounded-full bg-amber-50 text-amber-700 font-semibold">
+                                Low stock
+                              </span>
+                            )}
+                            {!inStock && (
+                              <span className="text-xs px-2 py-1 rounded-full bg-slate-200 text-slate-700 font-semibold">
+                                Out
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="p-3">
+                          <div className="text-[11px] text-slate-500 mb-1">
+                            {p.category?.name || "Uncategorized"}
+                          </div>
+
+                          <div className="font-semibold text-slate-900 text-sm line-clamp-2 min-h-[40px]">
+                            {p.name}
+                          </div>
+
+                          <div className="mt-2 flex items-center justify-between">
+                            <div>
+                              <div className="text-green-700 font-extrabold text-sm">{money(displayPrice)}</div>
+                              {hasDiscount && (
+                                <div className="text-[11px] text-slate-500 line-through">{money(p.price)}</div>
+                              )}
+                            </div>
+
+                            <div className="text-[11px] text-slate-500">
+                              Stock: {Number(p.stock ?? 0)}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="p-3 pt-0 grid grid-cols-1 gap-2">
+                        <Button
+                          type="button"
+                          className="flex-1 bg-white text-slate-900 border-2 border-slate-800 hover:bg-slate-50"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (!requireLogin()) return;
+
+                            // ✅ animation only (no backend change)
+                            flyToCart(imgRef.current);
+
+                            // ✅ original logic untouched
+                            add(p._id, 1);
+                          }}
+                          disabled={!inStock}
+                        >
+                          Add to cart
+                        </Button>
+
+                        <Button
+                          type="button"
+                          className="flex-1 bg-green-700 hover:bg-green-800 text-white"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (!requireLogin()) return;
+                            buyNow(p._id);
+                          }}
+                          disabled={!inStock}
+                        >
+                          Buy it now
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {!loading && products.length === 0 && !error && (
+                  <div className="col-span-2 md:col-span-3 xl:col-span-4 rounded-2xl border bg-white p-10 text-center text-slate-600">
+                    No products found.
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-8 flex justify-center">
+                <Button
+                  variant="outline"
+                  className="border-slate-300"
+                  disabled={loading}
+                  onClick={async () => {
+                    const next = page + 1;
+                    setPage(next);
+                    await fetchProducts(next, "append");
+                  }}
+                >
+                  {loading ? "Loading..." : "Load more"}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <Footer />
+    </div>
+  );
+}
