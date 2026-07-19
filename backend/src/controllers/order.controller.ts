@@ -1,0 +1,452 @@
+import { Response } from "express";
+import mongoose from "mongoose";
+import { AuthRequest } from "../middleware/auth.middleware";
+import { HttpError } from "../errors/http-error";
+import { CartModel } from "../models/cart.model";
+import { ProductModel } from "../models/product.model";
+import { OrderModel } from "../models/order.model";
+import PDFDocument from "pdfkit";
+import path from "path";
+import fs from "fs";
+import { generateInvoicePdfBuffer } from "../services/invoice.service";
+import { UserModel } from "../models/user.model"; // only if you want customer name/email on invoice
+import { SettingsService } from "../services/settings.service";
+import { getCompanyFromSettings } from "../services/company.service";
+
+
+
+
+function mustUserId(req: AuthRequest) {
+  const userId = req.user?.id;
+  if (!userId) throw new HttpError(401, "Not authorized");
+  return userId;
+}
+
+function computeSubtotalFromCart(cart: any) {
+  const items = cart?.items || [];
+  return items.reduce((sum: number, it: any) => {
+    const qty = Number(it.qty ?? 0);
+    const snap = Number(it.priceSnapshot ?? 0);
+    return sum + qty * snap;
+  }, 0);
+}
+
+export class OrderController {
+  // POST /api/orders
+  // body: { address?: string, paymentMethod?: "COD" }
+
+  
+  async createFromCart(req: AuthRequest, res: Response) {
+    const userId = mustUserId(req);
+
+    const { address, paymentMethod, selectedProductIds } = req.body as {
+    address?: string;
+    paymentMethod?: string;
+    selectedProductIds?: string[];
+  };
+    
+
+    const addr = String(address ?? "").trim();
+    const pay = String(paymentMethod ?? "COD").trim().toUpperCase();
+
+    if (!addr) throw new HttpError(400, "Address is required");
+
+    if (!["COD", "KHALTI", "ESEWA"].includes(pay)) {
+      throw new HttpError(400, "Invalid paymentMethod");
+    }
+       
+    const settingsService = new SettingsService();
+    
+    // 1) load cart (NO heavy populate; we only need ids + qty + snapshot)
+    const cart = await CartModel.findOne({ user: userId }).lean();
+    if (!cart || !cart.items || cart.items.length === 0) {
+      throw new HttpError(400, "Cart is empty");
+    }
+
+    // ✅ If selectedProductIds provided, order only those cart items
+// ✅ If selectedProductIds provided, order only those cart items
+let cartItems: any[] = Array.isArray((cart as any)?.items) ? (cart as any).items : [];
+
+if (Array.isArray(selectedProductIds) && selectedProductIds.length > 0) {
+  const selectedSet = new Set(selectedProductIds.map(String));
+
+  cartItems = cartItems.filter((it: any) => selectedSet.has(String(it.product)));
+
+  if (cartItems.length === 0) {
+    throw new HttpError(400, "No selected items found in cart");
+  }
+}
+
+    // 2) validate products in bulk
+    const productIds = cartItems.map((it: any) => it.product).filter(Boolean);
+    const products = await ProductModel.find({
+      _id: { $in: productIds },
+      deleted_at: null,
+      status: "active",
+    })
+      .select("name slug sku price discountPrice stock images")
+      .lean();
+
+    const byId = new Map<string, any>();
+    for (const p of products) byId.set(String(p._id), p);
+
+    // validate stock + build snapshot items
+    const orderItems = cartItems.map((it: any) => {
+      const pid = String(it.product);
+      const p = byId.get(pid);
+
+      if (!p) {
+        throw new HttpError(400, `Product not available: ${pid}`);
+      }
+
+      const qty = Number(it.qty ?? 0);
+      if (!Number.isInteger(qty) || qty < 1) {
+        throw new HttpError(400, "Invalid cart qty");
+      }
+
+      const stock = Number(p.stock ?? 0);
+      if (stock < qty) {
+        throw new HttpError(400, `Insufficient stock for ${p.name}`);
+      }
+
+      const snap = Number(it.priceSnapshot ?? 0);
+      if (!Number.isFinite(snap) || snap < 0) {
+        throw new HttpError(400, "Invalid priceSnapshot in cart");
+      }
+
+      const image = Array.isArray(p.images) && p.images.length > 0 ? String(p.images[0]) : null;
+
+      return {
+        product: new mongoose.Types.ObjectId(pid),
+        name: String(p.name),
+        slug: String(p.slug),
+        sku: String(p.sku),
+        image,
+        qty,
+        priceSnapshot: snap,
+      };
+    });
+
+    const subtotal = computeSubtotalFromCart({ items: orderItems });
+    const settings = await settingsService.getOrCreate();
+
+// ✅ enforce enabled payments
+    const enabled = settings?.payments || { COD: true, KHALTI: true, ESEWA: true };
+    if (pay === "COD" && !enabled.COD) throw new HttpError(400, "COD is disabled");
+    if (pay === "KHALTI" && !enabled.KHALTI) throw new HttpError(400, "Khalti is disabled");
+    if (pay === "ESEWA" && !enabled.ESEWA) throw new HttpError(400, "eSewa is disabled");
+
+    // ✅ shipping fee rules
+    const shippingFeeDefault = Number(settings?.shippingFeeDefault ?? 0);
+    const freeShippingThreshold =
+      settings?.freeShippingThreshold === null || settings?.freeShippingThreshold === undefined
+        ? null
+        : Number(settings.freeShippingThreshold);
+
+    let shippingFee = Math.max(0, shippingFeeDefault);
+
+    if (freeShippingThreshold !== null && Number.isFinite(freeShippingThreshold)) {
+      if (subtotal >= freeShippingThreshold) shippingFee = 0;
+    }
+
+    const total = subtotal + shippingFee;
+
+    // 3) Reduce stock + create order + clear cart
+    // Prefer transaction if Mongo supports it; fallback if not.
+    // ... you already built: orderItems, subtotal, shippingFee, total
+
+const session = await mongoose.startSession();
+
+try {
+  session.startTransaction();
+
+  // ✅ 1) DECREASE STOCK (atomic per item)
+  for (const it of orderItems) {
+    const r = await ProductModel.updateOne(
+      { _id: it.product, deleted_at: null, stock: { $gte: it.qty } },
+      { $inc: { stock: -it.qty } },
+      { session }
+    );
+
+    // if nothing updated => not enough stock (someone else bought it)
+    if (r.modifiedCount === 0) {
+      throw new HttpError(400, `Insufficient stock for ${it.name}`);
+    }
+  }
+
+  // ✅ 2) CREATE ORDER
+  const created = await OrderModel.create(
+    [
+      {
+        user: new mongoose.Types.ObjectId(userId),
+        items: orderItems,
+        subtotal,
+        shippingFee,
+        total,
+        status: "pending",
+        address: addr,
+        paymentMethod: pay as any,
+        paymentGateway: pay as any,
+      },
+    ],
+    { session }
+  );
+
+  // ✅ 3) CLEAR CART
+  if (Array.isArray(selectedProductIds) && selectedProductIds.length > 0) {
+  await CartModel.updateOne(
+    { user: userId },
+    { $pull: { items: { product: { $in: selectedProductIds.map((id) => new mongoose.Types.ObjectId(id)) } } } },
+    { session }
+  );
+} else {
+  // normal checkout => clear cart
+  await CartModel.updateOne({ user: userId }, { $set: { items: [] } }, { session });
+}
+
+  await session.commitTransaction();
+
+  return res.status(201).json({ success: true, data: created[0] });
+} catch (err: any) {
+  try {
+    await session.abortTransaction();
+  } catch {}
+
+  // ✅ FALLBACK (if your MongoDB doesn't support transactions)
+  if (String(err?.message || "").includes("Transaction numbers are only allowed")) {
+
+    // ✅ decrease stock WITHOUT session
+    for (const it of orderItems) {
+      const r = await ProductModel.updateOne(
+        { _id: it.product, deleted_at: null, stock: { $gte: it.qty } },
+        { $inc: { stock: -it.qty } }
+      );
+      if (r.modifiedCount === 0) throw new HttpError(400, `Insufficient stock for ${it.name}`);
+    }
+
+    // ✅ create order
+    const created = await OrderModel.create({
+      user: new mongoose.Types.ObjectId(userId),
+      items: orderItems,
+      subtotal,
+      shippingFee,
+      total,
+      status: "pending",
+      address: addr,
+      paymentMethod: pay as any,
+      paymentGateway: pay as any,
+    });
+
+    // ✅ clear cart
+    if (Array.isArray(selectedProductIds) && selectedProductIds.length > 0) {
+  await CartModel.updateOne(
+    { user: userId },
+    {
+      $pull: {
+        items: {
+          product: { $in: selectedProductIds.map((id) => new mongoose.Types.ObjectId(id)) },
+        },
+      },
+    }
+  );
+} else {
+  await CartModel.updateOne({ user: userId }, { $set: { items: [] } });
+}
+
+    return res.status(201).json({ success: true, data: created });
+  }
+
+  throw err;
+} finally {
+  session.endSession();
+}
+  }
+
+
+
+  // GET /api/orders/:id/invoice
+async downloadInvoice(req: AuthRequest, res: Response) {
+  const userId = mustUserId(req);
+  const { id } = req.params;
+
+  if (!mongoose.Types.ObjectId.isValid(id)) throw new HttpError(400, "Invalid order id");
+
+  const order = await OrderModel.findOne({ _id: id, user: userId, deleted_at: null }).lean();
+  if (!order) throw new HttpError(404, "Order not found");
+
+  if (String(order.paymentStatus || "").toLowerCase() !== "paid") {
+    throw new HttpError(400, "Invoice available only after payment");
+  }
+
+  // ✅ Fetch user directly
+  const user = await UserModel.findById(userId).select("fullName email countryCode phone").lean();
+
+  const cc = String((user as any)?.countryCode || "").trim();
+  const ph = String((user as any)?.phone || "").trim();
+  const customerPhone = ph ? `${cc}${ph}` : "-";
+
+
+
+  const company = await getCompanyFromSettings();
+  const safeLogoPath = fs.existsSync(company.logoPath) ? company.logoPath : undefined;
+
+
+
+
+  const pdf = await generateInvoicePdfBuffer({
+  order,
+  company: {
+    name: company.name,
+    address: company.address,
+    email: company.email,
+    phone: company.phone,
+  },
+  logoPath: safeLogoPath,
+  customer: {
+    name: (user as any)?.fullName || "-",
+    email: (user as any)?.email || "-",
+    phone: customerPhone,
+  },
+});
+
+  // ✅ prevent cached old PDF
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `inline; filename="invoice-${String(order._id).slice(-8)}.pdf"`);
+
+  return res.status(200).send(pdf);
+}
+
+
+
+  // GET /api/orders/me
+  async myOrders(req: AuthRequest, res: Response) {
+    const userId = mustUserId(req);
+
+    const page = Math.max(1, Number(req.query.page ?? 1));
+    const limit = Math.min(50, Math.max(1, Number(req.query.limit ?? 10)));
+    const skip = (page - 1) * limit;
+
+    const [rows, total] = await Promise.all([
+      OrderModel.find({ user: userId, deleted_at: null })
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      OrderModel.countDocuments({ user: userId, deleted_at: null }),
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      data: rows,
+      meta: { total, page, limit },
+    });
+  }
+
+    // GET /api/orders/:id  (must belong to logged user)
+  async getMyOrderById(req: AuthRequest, res: Response) {
+    const userId = mustUserId(req);
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) throw new HttpError(400, "Invalid order id");
+
+    const order = await OrderModel.findOne({ _id: id, user: userId, deleted_at: null }).lean();
+    if (!order) throw new HttpError(404, "Order not found");
+
+    return res.status(200).json({ success: true, data: order });
+  }
+
+  // PUT /api/orders/:id/cancel
+  // PUT /api/orders/:id/cancel
+// PUT /api/orders/:id/cancel
+async cancelMyOrder(req: AuthRequest, res: Response) {
+  const userId = mustUserId(req);
+  const { id } = req.params;
+
+  if (!mongoose.Types.ObjectId.isValid(id)) throw new HttpError(400, "Invalid order id");
+
+  // ✅ take reason from body
+  const reasonRaw = String(req.body?.reason ?? "").trim();
+  const reason = reasonRaw.length ? reasonRaw.slice(0, 300) : null; // limit length
+
+  const session = await mongoose.startSession();
+
+  try {
+    session.startTransaction();
+
+    // find order (must belong to user)
+    const order = await OrderModel.findOne(
+      { _id: id, user: userId, deleted_at: null },
+      null,
+      { session }
+    );
+
+    if (!order) throw new HttpError(404, "Order not found");
+
+    // only pending can be cancelled
+    if (order.status !== "pending") {
+      throw new HttpError(400, "Only pending orders can be cancelled");
+    }
+
+    // already cancelled protection
+    if ((order as any).cancelled_at) {
+      await session.commitTransaction();
+      return res.status(200).json({ success: true, data: order });
+    }
+
+    // restore stock
+   
+
+    // update order fields
+    order.status = "cancelled";
+    (order as any).cancelled_at = new Date();
+    (order as any).cancelled_by = new mongoose.Types.ObjectId(userId);
+    (order as any).cancel_reason = reason;
+
+    await order.save({ session });
+
+    await session.commitTransaction();
+
+    return res.status(200).json({ success: true, data: order });
+  } catch (err: any) {
+    try {
+      await session.abortTransaction();
+    } catch {}
+
+    // ✅ fallback if transactions not supported
+    if (String(err?.message || "").toLowerCase().includes("transaction")) {
+      const order = await OrderModel.findOne({ _id: id, user: userId, deleted_at: null });
+      if (!order) throw new HttpError(404, "Order not found");
+
+      if (order.status !== "pending") throw new HttpError(400, "Only pending orders can be cancelled");
+      if ((order as any).cancelled_at) return res.status(200).json({ success: true, data: order });
+
+      for (const it of order.items || []) {
+        const qty = Number((it as any).qty || 0);
+        if (qty > 0) {
+          await ProductModel.updateOne(
+            { _id: (it as any).product, deleted_at: null },
+            { $inc: { stock: qty } }
+          );
+        }
+      }
+
+      order.status = "cancelled";
+      (order as any).cancelled_at = new Date();
+      (order as any).cancelled_by = new mongoose.Types.ObjectId(userId);
+      (order as any).cancel_reason = reason;
+
+      await order.save();
+
+      return res.status(200).json({ success: true, data: order });
+    }
+
+    throw err;
+  } finally {
+    session.endSession();
+  }
+}
+
+
+
+}
