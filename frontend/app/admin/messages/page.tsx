@@ -71,7 +71,6 @@ export default function AdminMessagesPage() {
  
   const totalPages = Math.max(1, Math.ceil(meta.total / limit));
  
-  // mark as read when opened
   const openMessage = async (m: ContactMessage) => {
     setSelected(m);
     if (m.status === "new") {

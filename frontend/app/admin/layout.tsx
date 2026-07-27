@@ -20,7 +20,6 @@ function AdminShell({ children }: { children: ReactNode }) {
         <AdminSidebar />
       </aside>
  
-      {/* ===== Main area ===== */}
       <div
         className={[
           "flex flex-col flex-1 min-w-0 transition-all duration-300",
