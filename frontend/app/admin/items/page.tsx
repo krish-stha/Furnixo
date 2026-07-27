@@ -267,7 +267,6 @@ export default function AdminItemsPage() {
         </div>
       )}
  
-      {/* ===== CREATE + LIVE PREVIEW ===== */}
       <div className="rounded-xl border border-neutral-200 bg-white">
         <div className="border-b border-neutral-200 px-6 py-4">
           <p className="text-sm font-semibold text-neutral-900">Add new product</p>
