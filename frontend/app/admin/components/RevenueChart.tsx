@@ -1,5 +1,5 @@
 "use client";
- 
+
 import { useState } from "react";
 import { Download } from "lucide-react";
 import {
@@ -15,44 +15,61 @@ import {
   Tooltip,
   CartesianGrid,
 } from "recharts";
- 
+
 type ChartKind = "line" | "bar" | "area";
- 
-// ─── CSV export (client-side only) ──────────────────────────────────────────
+
 function exportCSV(rows: any[], from?: string, to?: string) {
   const header = "Period,Revenue,Orders\n";
+
   const body = rows
-    .map((r: any) => `${r.label ?? ""},${r.revenue ?? 0},${r.orders ?? 0}`)
+    .map(
+      (row: any) =>
+        `${row.label ?? ""},${row.revenue ?? 0},${row.orders ?? 0}`,
+    )
     .join("\n");
-  const blob = new Blob([header + body], { type: "text/csv;charset=utf-8;" });
+
+  const blob = new Blob([header + body], {
+    type: "text/csv;charset=utf-8;",
+  });
+
   const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  const name = from && to ? `revenue_${from}_${to}.csv` : "revenue_export.csv";
-  a.download = name;
-  a.click();
+  const anchor = document.createElement("a");
+
+  anchor.href = url;
+  anchor.download =
+    from && to ? `revenue_${from}_${to}.csv` : "revenue_export.csv";
+
+  anchor.click();
   URL.revokeObjectURL(url);
 }
- 
-// ─── Custom tooltip ──────────────────────────────────────────────────────────
+
 function CustomTooltip({ active, payload, label }: any) {
   if (!active || !payload?.length) return null;
+
   return (
-    <div className="rounded-lg border border-white/10 bg-neutral-800 px-3 py-2 text-xs shadow-xl">
-      <p className="mb-1 font-semibold text-neutral-300">{label}</p>
-      {payload.map((p: any) => (
-        <p key={p.dataKey} className="text-white">
-          {p.dataKey === "revenue" ? "Revenue" : "Orders"}:{" "}
-          <span className="font-bold">
-            {p.dataKey === "revenue" ? `Rs. ${Number(p.value).toLocaleString("en-IN")}` : p.value}
+    <div className="min-w-[150px] rounded-lg border border-neutral-200 bg-white px-3 py-2 shadow-lg">
+      <p className="mb-1 text-xs font-semibold text-neutral-500">{label}</p>
+
+      {payload.map((item: any) => (
+        <div
+          key={item.dataKey}
+          className="flex items-center justify-between gap-4 text-xs"
+        >
+          <span className="capitalize text-neutral-500">
+            {item.dataKey === "revenue" ? "Revenue" : "Orders"}
           </span>
-        </p>
+
+          <span className="font-semibold text-neutral-950">
+            {item.dataKey === "revenue"
+              ? `Rs. ${Number(item.value).toLocaleString("en-IN")}`
+              : item.value}
+          </span>
+        </div>
       ))}
     </div>
   );
 }
- 
-// ─── RevenueChart ─────────────────────────────────────────────────────────────
+
 export function RevenueChart({
   loading,
   rows,
@@ -67,130 +84,210 @@ export function RevenueChart({
   chartType?: "day" | "month";
 }) {
   const [kind, setKind] = useState<ChartKind>("area");
+
   const title = chartType === "day" ? "Daily Revenue" : "Monthly Revenue";
-  const hasData = rows.length > 0 && rows.some((r) => Number(r.revenue) > 0);
- 
+
+  const hasData =
+    rows.length > 0 &&
+    rows.some(
+      (row) => Number(row.revenue) > 0 || Number(row.orders) > 0,
+    );
+
   const chartProps = {
     data: rows,
-    margin: { top: 8, right: 16, left: 0, bottom: 0 },
+    margin: {
+      top: 12,
+      right: 18,
+      left: 4,
+      bottom: 0,
+    },
   };
+
   const axisProps = {
-    stroke: "#525252",
-    tick: { fill: "#737373", fontSize: 11 },
+    axisLine: false,
+    tickLine: false,
+    tick: {
+      fill: "#737373",
+      fontSize: 11,
+    },
   };
-  const gridProps = { stroke: "#404040", strokeDasharray: "4 4" };
- 
+
+  const sharedElements = (
+    <>
+      <CartesianGrid
+        vertical={false}
+        stroke="#e5e5e5"
+        strokeDasharray="4 4"
+      />
+
+      <XAxis
+        dataKey="label"
+        {...axisProps}
+        minTickGap={20}
+        tickMargin={10}
+      />
+
+      <YAxis
+        {...axisProps}
+        width={52}
+        tickMargin={8}
+        tickFormatter={(value) =>
+          Number(value) >= 1000
+            ? `${(Number(value) / 1000).toFixed(
+                Number(value) % 1000 === 0 ? 0 : 1,
+              )}k`
+            : String(value)
+        }
+      />
+
+      <Tooltip
+        content={<CustomTooltip />}
+        cursor={{
+          stroke: "#a3a3a3",
+          strokeWidth: 1,
+          strokeDasharray: "4 4",
+        }}
+      />
+    </>
+  );
+
   const renderChart = () => {
-    const shared = (
-      <>
-        <CartesianGrid {...gridProps} />
-        <XAxis dataKey="label" {...axisProps} />
-        <YAxis {...axisProps} />
-        <Tooltip content={<CustomTooltip />} />
-      </>
-    );
- 
     if (kind === "bar") {
       return (
         <BarChart {...chartProps}>
-          {shared}
-          <Bar dataKey="revenue" fill="#e5e5e5" radius={[3, 3, 0, 0]} />
+          {sharedElements}
+
+          <Bar
+            dataKey="revenue"
+            fill="#171717"
+            radius={[5, 5, 0, 0]}
+            maxBarSize={40}
+          />
         </BarChart>
       );
     }
-    if (kind === "area") {
+
+    if (kind === "line") {
       return (
-        <AreaChart {...chartProps}>
-          <defs>
-            <linearGradient id="rev-grad" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor="#ffffff" stopOpacity={0.15} />
-              <stop offset="95%" stopColor="#ffffff" stopOpacity={0} />
-            </linearGradient>
-          </defs>
-          {shared}
-          <Area
+        <LineChart {...chartProps}>
+          {sharedElements}
+
+          <Line
             type="monotone"
             dataKey="revenue"
-            stroke="#ffffff"
-            strokeWidth={2}
-            fill="url(#rev-grad)"
+            stroke="#171717"
+            strokeWidth={2.5}
             dot={false}
+            activeDot={{
+              r: 5,
+              fill: "#171717",
+              stroke: "#ffffff",
+              strokeWidth: 2,
+            }}
           />
-        </AreaChart>
+        </LineChart>
       );
     }
+
     return (
-      <LineChart {...chartProps}>
-        {shared}
-        <Line
+      <AreaChart {...chartProps}>
+        <defs>
+          <linearGradient
+            id="revenue-area-gradient"
+            x1="0"
+            y1="0"
+            x2="0"
+            y2="1"
+          >
+            <stop offset="0%" stopColor="#171717" stopOpacity={0.18} />
+            <stop offset="90%" stopColor="#171717" stopOpacity={0.01} />
+          </linearGradient>
+        </defs>
+
+        {sharedElements}
+
+        <Area
           type="monotone"
           dataKey="revenue"
-          stroke="#ffffff"
-          strokeWidth={2}
+          stroke="#171717"
+          strokeWidth={2.5}
+          fill="url(#revenue-area-gradient)"
           dot={false}
-          activeDot={{ r: 4, fill: "#ffffff" }}
+          activeDot={{
+            r: 5,
+            fill: "#171717",
+            stroke: "#ffffff",
+            strokeWidth: 2,
+          }}
         />
-      </LineChart>
+      </AreaChart>
     );
   };
- 
+
   return (
-    <div className="overflow-hidden rounded-xl bg-neutral-950 p-6">
-      {/* header */}
-      <div className="flex flex-wrap items-start justify-between gap-3">
+    <section className="overflow-hidden rounded-xl border border-neutral-200 bg-white">
+      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-neutral-100 px-5 py-5 sm:px-6">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-widest text-neutral-500">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-neutral-500">
             Revenue
           </p>
-          <h3 className="mt-1 text-base font-bold text-white">{title}</h3>
+
+          <h3 className="mt-1 text-base font-bold text-neutral-950">
+            {title}
+          </h3>
+
           {from && to && (
-            <p className="mt-0.5 text-xs text-neutral-500">
-              {from} → {to} · paid orders only
+            <p className="mt-1 text-xs text-neutral-500">
+              {from} → {to} · Paid orders only
             </p>
           )}
         </div>
- 
-        <div className="flex items-center gap-2">
-          {/* chart type toggle */}
-          <div className="flex rounded-lg border border-white/10 p-0.5">
-            {(["area", "line", "bar"] as ChartKind[]).map((k) => (
+
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex rounded-lg border border-neutral-200 bg-neutral-50 p-1">
+            {(["area", "line", "bar"] as ChartKind[]).map((chartKind) => (
               <button
-                key={k}
-                onClick={() => setKind(k)}
+                key={chartKind}
+                type="button"
+                onClick={() => setKind(chartKind)}
                 className={[
-                  "rounded-md px-3 py-1 text-xs font-medium capitalize transition-colors",
-                  kind === k
-                    ? "bg-white text-neutral-900"
-                    : "text-neutral-400 hover:text-white",
+                  "rounded-md px-3 py-1.5 text-xs font-medium capitalize transition-all",
+                  kind === chartKind
+                    ? "bg-white text-neutral-950 shadow-sm ring-1 ring-neutral-200"
+                    : "text-neutral-500 hover:text-neutral-950",
                 ].join(" ")}
               >
-                {k}
+                {chartKind}
               </button>
             ))}
           </div>
- 
-          {/* CSV export */}
+
           <button
+            type="button"
             onClick={() => exportCSV(rows, from, to)}
             disabled={rows.length === 0}
-            title="Export CSV"
-            className="flex items-center gap-1.5 rounded-lg border border-white/10 px-3 py-1.5 text-xs font-medium text-neutral-400 transition-colors hover:border-white/30 hover:text-white disabled:opacity-40"
+            className="flex items-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-xs font-medium text-neutral-600 transition-colors hover:border-neutral-300 hover:bg-neutral-50 hover:text-neutral-950 disabled:cursor-not-allowed disabled:opacity-40"
           >
             <Download className="h-3.5 w-3.5" />
             Export
           </button>
         </div>
       </div>
- 
-      {/* chart */}
-      <div className="mt-6 h-64">
+
+      <div className="h-[320px] min-w-0 px-2 pb-4 pt-5 sm:px-5">
         {loading ? (
           <div className="flex h-full items-center justify-center">
-            <div className="h-6 w-6 animate-spin rounded-full border-2 border-white/20 border-t-white" />
+            <div className="h-6 w-6 animate-spin rounded-full border-2 border-neutral-200 border-t-neutral-900" />
           </div>
         ) : !hasData ? (
-          <div className="flex h-full flex-col items-center justify-center gap-2">
-            <p className="text-sm text-neutral-600">No revenue data for this period</p>
+          <div className="flex h-full flex-col items-center justify-center rounded-lg border border-dashed border-neutral-200 bg-neutral-50">
+            <p className="text-sm font-medium text-neutral-700">
+              No revenue data
+            </p>
+
+            <p className="mt-1 text-xs text-neutral-500">
+              There are no paid orders for this period.
+            </p>
           </div>
         ) : (
           <ResponsiveContainer width="100%" height="100%">
@@ -198,6 +295,6 @@ export function RevenueChart({
           </ResponsiveContainer>
         )}
       </div>
-    </div>
+    </section>
   );
 }

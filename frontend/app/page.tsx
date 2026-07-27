@@ -56,7 +56,7 @@ export default function HomePage() {
               Meets Modern
             </h1>
             <p className="mt-4 text-sm leading-relaxed text-neutral-300">
-              Furniture crafted for contemporary living — timeless silhouettes,
+              Furniture crafted for contemporary living, timeless silhouettes,
               honest materials, built to last.
             </p>
             <div className="mt-8 flex gap-3">

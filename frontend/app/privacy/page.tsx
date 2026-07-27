@@ -1,7 +1,7 @@
 import { LegalPageView } from "../legal/LegalPageView";
  
 export const metadata = {
-  title: "Privacy Policy — Furnixo",
+  title: "Furnixo",
   description: "Read how Furnixo collects, uses, and protects your personal information.",
 };
  

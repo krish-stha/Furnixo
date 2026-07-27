@@ -15,7 +15,7 @@ const _geist = Geist({ subsets: ["latin"] });
 const _geistMono = Geist_Mono({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-    title: "Furnixo — Where Traditional Meets Modern",
+    title: "Furnixo",
   description:
     "Furnixo is a modern furniture store. Shop chairs, sofas, tables, armchairs, cabinets and decor — crafted for contemporary living.",
   generator: "v0.app",

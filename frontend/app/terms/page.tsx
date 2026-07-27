@@ -1,7 +1,7 @@
 import { LegalPageView } from "../legal/LegalPageView";
  
 export const metadata = {
-  title: "Terms of Service — Furnixo",
+  title: "Furnixo",
   description: "The terms and conditions that govern your use of Furnixo.",
 };
  

@@ -156,11 +156,11 @@ export function AdminSidebar() {
  
       {/* ── Nav ── */}
       <nav
-        className={[
-          "flex-1 overflow-y-auto py-4",
-          collapsed ? "px-2" : "px-3",
-        ].join(" ")}
-      >
+  className={[
+    "flex-1 overflow-y-auto py-4 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden",
+    collapsed ? "px-2" : "px-3",
+  ].join(" ")}
+>
         <SectionLabel title="Overview" />
         <NavItem href="/admin/dashboard" label="Dashboard" icon={LayoutDashboard} />
  
