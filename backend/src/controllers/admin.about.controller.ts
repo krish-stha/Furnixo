@@ -5,7 +5,6 @@ import { AboutService } from "../services/about.service";
 const service = new AboutService();
 
 export class AdminAboutController {
-  // GET /api/admin/about
   async get(req: AuthRequest, res: Response) {
     const doc = await service.getOrCreate();
     return res.status(200).json({ success: true, data: doc });
