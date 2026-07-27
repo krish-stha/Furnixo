@@ -154,7 +154,6 @@ export function AdminSidebar() {
         )}
       </div>
  
-      {/* ── Nav ── */}
       <nav
   className={[
     "flex-1 overflow-y-auto py-4 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden",
