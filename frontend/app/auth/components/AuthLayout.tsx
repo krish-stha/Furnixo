@@ -53,7 +53,7 @@ export default function AuthLayout({
               Meets Modern
             </h2>
             <p className="mt-4 max-w-sm text-sm leading-relaxed text-neutral-400">
-              Furniture crafted for contemporary living — timeless silhouettes,
+              Furniture crafted for contemporary living, timeless silhouettes,
               honest materials, built to last.
             </p>
           </div>
