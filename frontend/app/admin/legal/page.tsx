@@ -144,7 +144,6 @@ export default function AdminLegalPage() {
         </div>
       </div>
  
-      {/* tabs */}
       <div className="flex gap-1 rounded-lg border border-neutral-200 bg-neutral-50 p-1 w-fit">
         {TABS.map((t) => (
           <button
